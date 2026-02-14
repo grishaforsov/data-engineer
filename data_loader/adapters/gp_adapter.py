@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import List, Tuple
 import io
+import time
 
 import psycopg2
 import pandas as pd
@@ -71,7 +72,15 @@ class GPAdapter:
         finally:
             cnx.close()
 
-    def copy_df(self, table: str, df: pd.DataFrame, target_cols: List[str], force_lower_cols: bool) -> int:
+    def copy_df(
+        self,
+        table: str,
+        df: pd.DataFrame,
+        target_cols: List[str],
+        force_lower_cols: bool,
+        retry_attempts: int = 3,
+        retry_delay_sec: float = 1.0,
+    ) -> int:
         assert_safe_name(table, "table")
         if df.empty:
             return 0
@@ -97,11 +106,21 @@ class GPAdapter:
         from stdin with (format csv, header false, null '', delimiter ',', quote '"', escape '"')
         """
 
-        cnx = self.connect()
-        try:
-            with cnx.cursor() as cur:
-                cur.copy_expert(copy_sql, buf)
-            cnx.commit()
-            return len(work)
-        finally:
-            cnx.close()
+        last_err = None
+        for attempt in range(1, int(retry_attempts) + 1):
+            cnx = self.connect()
+            try:
+                buf.seek(0)
+                with cnx.cursor() as cur:
+                    cur.copy_expert(copy_sql, buf)
+                cnx.commit()
+                return len(work)
+            except Exception as e:
+                last_err = e
+                cnx.rollback()
+                if attempt < int(retry_attempts):
+                    time.sleep(float(retry_delay_sec) * attempt)
+            finally:
+                cnx.close()
+
+        raise last_err if last_err is not None else RuntimeError("GP copy failed.")

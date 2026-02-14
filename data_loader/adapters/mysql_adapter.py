@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import List, Tuple
+import time
 
 import mysql.connector
 import pandas as pd
@@ -64,7 +65,16 @@ class MySQLAdapter:
         finally:
             cnx.close()
 
-    def insert_df(self, table: str, df: pd.DataFrame, batch_size: int, insert_mode: str, progress_cb=None) -> int:
+    def insert_df(
+        self,
+        table: str,
+        df: pd.DataFrame,
+        batch_size: int,
+        insert_mode: str,
+        progress_cb=None,
+        retry_attempts: int = 3,
+        retry_delay_sec: float = 1.0,
+    ) -> int:
         assert_safe_name(table, "table")
         if df.empty:
             return 0
@@ -77,19 +87,37 @@ class MySQLAdapter:
         placeholders = ", ".join(["%s"] * len(cols))
         sql = f"{insert_mode} into {table} ({cols_sql}) values ({placeholders})"
 
-        rows = list(df.itertuples(index=False, name=None))
         cnx = self.connect()
         cur = cnx.cursor()
+        total_rows = len(df)
 
         inserted = 0
         try:
-            for i in range(0, len(rows), int(batch_size)):
-                batch = rows[i : i + int(batch_size)]
-                cur.executemany(sql, batch)
-                cnx.commit()
+            for i in range(0, total_rows, int(batch_size)):
+                batch_df = df.iloc[i : i + int(batch_size)]
+                batch = list(batch_df.itertuples(index=False, name=None))
+                if not batch:
+                    continue
+
+                last_err = None
+                for attempt in range(1, int(retry_attempts) + 1):
+                    try:
+                        cur.executemany(sql, batch)
+                        cnx.commit()
+                        last_err = None
+                        break
+                    except Exception as e:
+                        last_err = e
+                        cnx.rollback()
+                        if attempt < int(retry_attempts):
+                            time.sleep(float(retry_delay_sec) * attempt)
+
+                if last_err is not None:
+                    raise last_err
+
                 inserted += len(batch)
                 if progress_cb:
-                    progress_cb(inserted, len(rows))
+                    progress_cb(inserted, total_rows)
             return inserted
         except Exception:
             cnx.rollback()

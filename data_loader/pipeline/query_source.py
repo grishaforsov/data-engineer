@@ -52,7 +52,7 @@ def ch_query_preview(client, sql: str, limit: int) -> pd.DataFrame:
     return df
 
 
-def ch_iter_chunks_df(client, sql: str, chunk_size: int) -> Iterator[pd.DataFrame]:
+def ch_iter_chunks_df(client, sql: str, chunk_size: int, sort_key: str | None = None) -> Iterator[pd.DataFrame]:
     """Итератор чанков для ClickHouse.
 
     В MySQL/GP можно использовать server-side cursor. В clickhouse-connect это не так удобно,
@@ -62,6 +62,32 @@ def ch_iter_chunks_df(client, sql: str, chunk_size: int) -> Iterator[pd.DataFram
     сразу писать запрос с собственной пагинацией (например по dt/id) и прогонять по диапазонам.
     """
     sql = sql.strip().rstrip(";")
+
+    if sort_key:
+        # keyset pagination: better than OFFSET for large result sets
+        key = sort_key.strip().replace("`", "")
+        last_value = None
+        while True:
+            if last_value is None:
+                chunk_sql = f"select * from ({sql}) t order by `{key}` limit {int(chunk_size)}"
+            else:
+                if isinstance(last_value, str):
+                    safe_value = last_value.replace("'", "''")
+                    predicate = f"`{key}` > '{safe_value}'"
+                else:
+                    predicate = f"`{key}` > {last_value}"
+                chunk_sql = (
+                    f"select * from ({sql}) t "
+                    f"where {predicate} order by `{key}` limit {int(chunk_size)}"
+                )
+
+            df = client.query_df(chunk_sql)
+            if df is None or df.empty:
+                break
+            yield df
+            last_value = df[key].iloc[-1]
+        return
+
     offset = 0
     while True:
         chunk_sql = f"select * from ({sql}) limit {int(chunk_size)} offset {int(offset)}"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Dict, Tuple
+import time
 
 import clickhouse_connect
 import pandas as pd
@@ -55,13 +56,20 @@ class CHAdapter:
         finally:
             client.close()
 
-    def insert_df(self, table: str, df: pd.DataFrame) -> int:
+    def insert_df(self, table: str, df: pd.DataFrame, retry_attempts: int = 3, retry_delay_sec: float = 1.0) -> int:
         if df.empty:
             return 0
-        client = self.connect()
-        try:
-            full = table if "." in table else f"{self.p.database}.{table}"
-            client.insert_df(full, df)
-            return len(df)
-        finally:
-            client.close()
+        full = table if "." in table else f"{self.p.database}.{table}"
+        last_err = None
+        for attempt in range(1, int(retry_attempts) + 1):
+            client = self.connect()
+            try:
+                client.insert_df(full, df)
+                return len(df)
+            except Exception as e:
+                last_err = e
+                if attempt < int(retry_attempts):
+                    time.sleep(float(retry_delay_sec) * attempt)
+            finally:
+                client.close()
+        raise last_err if last_err is not None else RuntimeError("ClickHouse insert failed.")

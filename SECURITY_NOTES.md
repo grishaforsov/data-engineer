@@ -4,11 +4,9 @@ This project is an internal utility. Before company-wide rollout, apply controls
 
 ## Current Risks
 
-- No built-in authentication or role-based access control in app UI.
-- Users can run arbitrary SQL in `Query(DB) -> DB` mode.
-- Destructive option exists: clear destination table before load.
 - DB credentials are entered in UI and kept in Streamlit session state.
-- No centralized audit log for who executed which load.
+- SQL guardrails are best-effort and should not replace DB-side permissions.
+- Destructive option still exists for admins (`clear_before`), so strict RBAC is required.
 
 ## Minimum Controls For Internal Use
 
@@ -21,9 +19,9 @@ This project is an internal utility. Before company-wide rollout, apply controls
 
 ## Recommended Next Improvements
 
-- Add app authentication (SSO or internal auth proxy).
-- Add RBAC by environment/schema/table.
-- Add SQL guardrails (allowlist/denylist, max rows/time).
+- Replace local env-based auth with SSO/internal auth proxy.
+- Add RBAC by environment/schema/table (not only app-level role).
+- Add SQL allowlist policy (approved datasets/tables), not only keyword checks.
 - Add approval flow for `clear_before` actions.
 - Add retention policy for logs and operational metrics.
 
