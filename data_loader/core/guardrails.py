@@ -41,6 +41,12 @@ class Guardrails:
     allowed_dst_dbs: set[str]
 
 
+@dataclass
+class RoleLimits:
+    max_rows: int | None
+    max_seconds: int | None
+
+
 def load_guardrails() -> Guardrails:
     return Guardrails(
         max_query_rows=_to_int(os.getenv("DL_MAX_QUERY_ROWS"), 5_000_000),
@@ -51,6 +57,13 @@ def load_guardrails() -> Guardrails:
         allowed_src_dbs=_to_set(os.getenv("DL_ALLOWED_SOURCE_DBS")),
         allowed_dst_dbs=_to_set(os.getenv("DL_ALLOWED_DEST_DBS")),
     )
+
+
+def role_limits(role: str) -> RoleLimits:
+    if role == "admin":
+        return RoleLimits(max_rows=None, max_seconds=None)
+    # loader defaults
+    return RoleLimits(max_rows=50_000_000, max_seconds=10_800)
 
 
 def enforce_allowlist(name: str, value: str, allowlist: set[str]) -> None:

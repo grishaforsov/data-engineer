@@ -12,6 +12,7 @@ from data_loader.core.auth import ensure_auth, load_auth_config, require_role
 from data_loader.core.guardrails import (
     enforce_allowlist,
     load_guardrails,
+    role_limits,
     require_clear_confirm,
     validate_cap,
     validate_sql,
@@ -42,13 +43,17 @@ if "cancel_requested" not in st.session_state:
 auth = load_auth_config()
 actor, role = ensure_auth(auth)
 guards = load_guardrails()
+limits = role_limits(role)
 
 st.sidebar.subheader("Session")
 st.sidebar.write(f"User: `{actor}`")
 st.sidebar.write(f"Role: `{role}`")
-st.sidebar.caption(
-    f"Guardrails: max_rows={guards.max_query_rows}, max_seconds={guards.max_query_seconds}"
-)
+if limits.max_rows is None:
+    st.sidebar.caption("Guardrails: role=admin, no row/time limits")
+else:
+    st.sidebar.caption(
+        f"Guardrails: role=loader, max_rows={limits.max_rows}, max_seconds={limits.max_seconds}"
+    )
 
 if st.button("Clear logs"):
     st.session_state["logs"] = []
@@ -375,6 +380,11 @@ if mode == "File -> DB":
                     else:
                         effective_rows = len(df_load)
 
+                    if limits.max_rows is not None and effective_rows > limits.max_rows:
+                        raise ValueError(
+                            f"Rows exceed loader limit: {effective_rows} > {limits.max_rows}"
+                        )
+
                     if dry_run:
                         st.success(f"Dry run OK. Rows ready for load: {effective_rows}")
                         with_audit(
@@ -386,31 +396,51 @@ if mode == "File -> DB":
                     else:
                         maybe_clear_destination()
                         prog = st.progress(0)
-
-                        def progress_cb(done: int, total: int) -> None:
-                            prog.progress(min(1.0, done / max(total, 1)))
+                        status = st.empty()
 
                         t0 = time.time()
                         with_audit("file_load_start", dst_type=dst_type, table=dst_table, rows=effective_rows)
+                        inserted = 0
+                        total = effective_rows
+                        target_cols_selected = list(mapping.keys())
 
-                        if dst_type == "MySQL":
-                            inserted = dst_adapter.insert_df(
-                                dst_table,
-                                df_load,
-                                int(batch_size),
-                                insert_mode,
-                                progress_cb=progress_cb,
-                            )
-                        elif dst_type == "ClickHouse":
+                        work_df = df_load
+                        if dst_type == "ClickHouse":
                             if df_cast.empty:
                                 raise ValueError("No rows left after ClickHouse casting.")
-                            inserted = dst_adapter.insert_df(dst_table, df_cast)
-                        else:
-                            target_cols_selected = list(mapping.keys())
-                            inserted = dst_adapter.copy_df(dst_table, df_load, target_cols_selected, force_lower_gp)
+                            work_df = df_cast
+
+                        for i in range(0, len(work_df), int(batch_size)):
+                            if st.session_state.get("cancel_requested", False):
+                                ui_log("Stop: cancel_requested=True")
+                                break
+
+                            if limits.max_seconds is not None and (time.time() - t0) > limits.max_seconds:
+                                raise TimeoutError(f"File load exceeded timeout ({limits.max_seconds}s).")
+
+                            chunk = work_df.iloc[i : i + int(batch_size)]
+                            if chunk.empty:
+                                continue
+
+                            if dst_type == "MySQL":
+                                dst_adapter.insert_df(
+                                    dst_table,
+                                    chunk,
+                                    len(chunk),
+                                    insert_mode,
+                                )
+                            elif dst_type == "ClickHouse":
+                                dst_adapter.insert_df(dst_table, chunk)
+                            else:
+                                dst_adapter.copy_df(dst_table, chunk, target_cols_selected, force_lower_gp)
+
+                            inserted += len(chunk)
+                            prog.progress(min(1.0, inserted / max(total, 1)))
+                            status.info(f"Loaded rows: {inserted}/{total}")
 
                         dt = time.time() - t0
                         prog.progress(1.0)
+                        status.info(f"Loaded rows total: {inserted}/{total}")
                         st.success(f"Done. Inserted rows: {inserted}. Time: {dt:.1f}s")
                         ui_log(f"Done. Inserted={inserted}, time={dt:.1f}s")
                         with_audit(
@@ -444,10 +474,10 @@ if mode == "Query(DB) -> DB":
         ).strip() or None
 
     query_cap = st.number_input(
-        "Max rows to load in this run (0 = no cap, still guarded by global limit)",
+        "Max rows to load in this run (0 = no cap for admin, loader capped by role)",
         min_value=0,
-        max_value=max(guards.max_query_rows, 1),
-        value=min(200000, guards.max_query_rows),
+        max_value=max(limits.max_rows or guards.max_query_rows, 1),
+        value=min(200000, limits.max_rows or guards.max_query_rows),
     )
 
     if st.button("Preview query"):
@@ -503,7 +533,8 @@ if mode == "Query(DB) -> DB":
                     check_source_policy()
                     check_destination_policy()
                     sql = validate_sql(sql_raw, guards.allow_only_select)
-                    validate_cap(int(query_cap), guards.max_query_rows)
+                    if limits.max_rows is not None:
+                        validate_cap(int(query_cap), limits.max_rows)
 
                     st.session_state["is_loading"] = True
                     st.session_state["cancel_requested"] = False
@@ -530,9 +561,12 @@ if mode == "Query(DB) -> DB":
                         st.session_state["is_loading"] = False
                     else:
                         prog = st.progress(0)
+                        status = st.empty()
                         t0 = time.time()
                         done = 0
                         cap = int(query_cap) if int(query_cap) > 0 else None
+                        if limits.max_rows is not None and cap is None:
+                            cap = limits.max_rows
                         with_audit(
                             "query_load_start",
                             src_type=src_type,
@@ -586,9 +620,9 @@ if mode == "Query(DB) -> DB":
                                     ui_log("Stop: cancel_requested=True")
                                     break
 
-                                if (time.time() - t0) > guards.max_query_seconds:
+                                if limits.max_seconds is not None and (time.time() - t0) > limits.max_seconds:
                                     raise TimeoutError(
-                                        f"Query load exceeded guardrail timeout ({guards.max_query_seconds}s)."
+                                        f"Query load exceeded timeout ({limits.max_seconds}s)."
                                     )
 
                                 chunk = src_fetch(int(batch_size))
@@ -633,8 +667,9 @@ if mode == "Query(DB) -> DB":
                                 done += len(df_chunk)
                                 if cap:
                                     prog.progress(min(1.0, done / max(cap, 1)))
+                                    status.info(f"Loaded rows: {done}/{cap}")
                                 else:
-                                    prog.progress((done % 100000) / 100000)
+                                    status.info(f"Loaded rows: {done} (total unknown)")
                                 ui_log(f"Loaded rows: {done}")
 
                                 if cap is not None and done >= cap:
@@ -643,6 +678,7 @@ if mode == "Query(DB) -> DB":
                             src_close()
 
                         prog.progress(1.0)
+                        status.info(f"Loaded rows total: {done}")
                         dt = time.time() - t0
                         st.success(f"Done. Read rows: {done}. Time: {dt:.1f}s")
                         ui_log(f"Done. Read={done}, time={dt:.1f}s")

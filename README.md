@@ -44,7 +44,7 @@ Windows:
 - ClickHouse type casting to destination schema.
 - Greenplum `COPY`-based loading.
 - Cancel flag for long-running load.
-- Role-based access (`viewer`, `loader`, `admin`) when auth is enabled.
+- Role-based access (`loader`, `admin`) when auth is enabled.
 - SQL guardrails for query mode (single statement, read-only keywords policy, row/time caps).
 - Destination clear confirmation (must type table name exactly).
 - Audit events to JSONL file.

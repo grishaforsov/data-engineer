@@ -7,7 +7,7 @@ from typing import Dict
 import streamlit as st
 
 
-VALID_ROLES = {"viewer", "loader", "admin"}
+VALID_ROLES = {"loader", "admin"}
 
 
 @dataclass
@@ -45,7 +45,7 @@ def ensure_auth(config: AuthConfig) -> tuple[str, str]:
     if "auth_user" not in st.session_state:
         st.session_state["auth_user"] = "anonymous"
     if "auth_role" not in st.session_state:
-        st.session_state["auth_role"] = "admin"
+        st.session_state["auth_role"] = "loader"
 
     if not config.enabled:
         return st.session_state["auth_user"], st.session_state["auth_role"]
@@ -57,7 +57,7 @@ def ensure_auth(config: AuthConfig) -> tuple[str, str]:
         )
         if st.sidebar.button("Logout"):
             st.session_state["auth_user"] = "anonymous"
-            st.session_state["auth_role"] = "viewer"
+            st.session_state["auth_role"] = "loader"
             st.rerun()
         return st.session_state["auth_user"], st.session_state["auth_role"]
 
